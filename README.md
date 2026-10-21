@@ -4,6 +4,8 @@ Part of **SRD (Systems Research & Development)**. Designation **SYS-002**, site 
 
 Generates five reference test signals as 48 kHz, 16-bit mono PCM WAV files (a 1 kHz sine, a logarithmic sweep, a click train, silence and a clipped sine), reads them back, and checks each one against closed-form expectations computed independently of the generator (32 checks, including a cross-check of the `wave`-based reader against an independent `struct`-based one in `wavparse.py`). Python standard library only; nothing is played back.
 
+> **Listening safety:** if you play these files, start at a **low volume**. `sine_1k_clipped_2x.wav` is clipped at full scale (0 dBFS); the sine, sweep and clicks peak at about half of full scale (about −6 dBFS). Raise the level slowly.
+
 ## Use
 
 ```bash
