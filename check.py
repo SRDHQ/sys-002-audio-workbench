@@ -5,7 +5,8 @@ Usage:
   python -I check.py <dir>
 
 Compares `measure` results against `oracle` closed-form expectations without
-importing or calling `synth` or `generate` (AC8).
+importing or calling `synth` or `generate` (AC8). Also cross-checks the `wave`-based
+reader (`measure`) against the `struct`-based reader (`wavparse`) per file (`xread.*`, AC12).
 Prints one line per check:
   `<check-id> PASS|FAIL measured=<v> expected=<v> tol=<v>`
 followed by:
@@ -27,8 +28,9 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import measure  # type: ignore[import-not-found]
     import oracle  # type: ignore[import-not-found]
+    import wavparse  # type: ignore[import-not-found]
 else:
-    from . import measure, oracle
+    from . import measure, oracle, wavparse
 
 
 @dataclass(frozen=True)
@@ -207,6 +209,61 @@ def _check_sweep_endpoint(
     return CheckResult(check_id, passed, meas_str, exp_str, tol_str)
 
 
+XREAD_MAX_BYTES = 1_048_576
+
+
+def compare_readers(parsed: wavparse.ParsedWav, m: measure.WavMeasurement) -> str:
+    """Compare the `struct` parse with the `wave` measurement; return `agree`, `diff:...` or `error:...`.
+
+    Stops at the first difference, in a fixed field order. Does not compare with the oracle.
+    """
+    if parsed.samples is None:
+        return "error:struct:not_16bit_mono"
+    pairs = (
+        ("channels", m.nchannels, parsed.channels),
+        ("sampwidth", m.sampwidth, parsed.bits // 8),
+        ("framerate", m.framerate, parsed.sample_rate),
+        ("nframes", m.nframes_header, parsed.nframes),
+        ("raw_bytes", m.raw_bytes_len, 2 * len(parsed.samples)),
+    )
+    for field, wave_v, struct_v in pairs:
+        if wave_v != struct_v:
+            return f"diff:{field}(wave={wave_v},struct={struct_v})"
+    if m.samples is None:
+        return "error:wave:no_samples"
+    differing = [i for i, (a, b) in enumerate(zip(m.samples, parsed.samples)) if a != b]
+    if differing:
+        return f"diff:samples(first={differing[0]},count={len(differing)})"
+    return "agree"
+
+
+def _check_xread(filename: str, path: Path, m: measure.WavMeasurement) -> CheckResult:
+    """Run xread.<file>: both readers must agree. Every failure is a FAIL with a reason token."""
+    check_id = f"xread.{filename}"
+
+    def result(measured: str) -> CheckResult:
+        return CheckResult(check_id, measured == "agree", measured, "agree", "exact")
+
+    try:
+        with path.open("rb") as fobj:
+            data = fobj.read(XREAD_MAX_BYTES + 1)
+    except FileNotFoundError:
+        return result("error:missing")
+    except OSError as exc:
+        return result(f"error:struct:read_error:{type(exc).__name__}")
+    if len(data) > XREAD_MAX_BYTES:
+        return result("error:struct:too_large")
+    try:
+        parsed = wavparse.parse_wav(data)
+    except wavparse.WavFormatError as exc:
+        return result(f"error:struct:{exc.reason}")
+    if parsed.chunk_ids != ("fmt ", "data"):
+        return result(f"error:struct:layout:{'+'.join(parsed.chunk_ids)}")
+    if not m.ok:
+        return result(f"error:wave:{m.error}")
+    return result(compare_readers(parsed, m))
+
+
 def run_all_checks(target_dir: str | Path) -> list[CheckResult]:
     """Measure all five WAV files in `target_dir` and return all CheckResults in deterministic order."""
     base = Path(target_dir)
@@ -236,6 +293,8 @@ def run_all_checks(target_dir: str | Path) -> list[CheckResult]:
             oracle.expected_sweep_end(),
         )
     )
+    for name in oracle.FILE_NAMES:
+        results.append(_check_xread(name, base / name, measurements[name]))
     return results
 
 

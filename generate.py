@@ -134,7 +134,10 @@ def generate_files(out_dir: str | Path, *, root: Path | None = None) -> tuple[in
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="Generate the five audio workbench WAV signals.")
+    ap = argparse.ArgumentParser(
+        description="Generate the five audio workbench WAV signals.",
+        epilog="Listening safety: if you play the files, start at a low volume. sine_1k_clipped_2x.wav is "
+               "clipped at full scale (0 dBFS); the sine, sweep and clicks peak near -6 dBFS.")
     ap.add_argument("--out", required=True, help="Output directory outside the repository")
     args = ap.parse_args(argv)
     code, _ = generate_files(args.out)

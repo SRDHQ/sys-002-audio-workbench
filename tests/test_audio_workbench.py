@@ -15,9 +15,11 @@ from __future__ import annotations
 
 from array import array
 import ast
+import dataclasses
 import math
 import os
 from pathlib import Path
+import struct
 import subprocess
 import sys
 import tempfile
@@ -34,6 +36,7 @@ import check  # type: ignore[import-not-found]
 import generate  # type: ignore[import-not-found]
 import measure  # type: ignore[import-not-found]
 import oracle  # type: ignore[import-not-found]
+import wavparse  # type: ignore[import-not-found]
 
 SIMULATED = True
 
@@ -112,9 +115,11 @@ class RoundTripTests(unittest.TestCase):
             self.assertNotIn(str(out_dir), chk_proc.stdout)
 
             checks, summary = _parse_check_output(chk_proc.stdout)
-            self.assertEqual(summary, "summary: 27/27")
+            self.assertEqual(summary, "summary: 32/32")
             for cid, (status, _, _, _) in checks.items():
                 self.assertEqual(status, "PASS", f"check {cid} did not pass")
+            for name in oracle.FILE_NAMES:
+                self.assertEqual(checks[f"xread.{name}"][:2], ("PASS", "agree"))
 
 
 class RefusalTests(unittest.TestCase):
@@ -354,6 +359,168 @@ class CheckerCanFailTests(unittest.TestCase):
                 status, meas, _, _ = checks[cid]
                 self.assertEqual(status, "FAIL", f"{cid} should FAIL when file is missing")
                 self.assertTrue(meas.startswith("error:"), f"{cid} should report error:<reason>, got {meas!r}")
+            self.assertEqual(checks["xread.sine_1k.wav"][:2], ("FAIL", "error:missing"))
+
+    def test_corrupted_byte_rate_that_wave_accepts_fails_only_xread(self) -> None:
+        """Revision 2 test 2: the 27 `wave`-based checks pass, `xread` catches the header fault."""
+        with tempfile.TemporaryDirectory(prefix="sim-fail-byterate-") as tmp:
+            d = Path(tmp)
+            self._prepare_dir_with_Valid_files(d)
+            path = d / "sine_1k.wav"
+            data = bytearray(path.read_bytes())
+            data[28:32] = struct.pack("<L", 48000)  # rate x 1: "forgot the sample width"
+            path.write_bytes(bytes(data))
+
+            proc = subprocess.run(
+                [sys.executable, "-I", str(PROJECT_DIR / "check.py"), str(d)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 1, msg=proc.stdout)
+            checks, summary = _parse_check_output(proc.stdout)
+            self.assertEqual(checks["xread.sine_1k.wav"][:2], ("FAIL", "error:struct:byte_rate_mismatch"))
+            others = {cid: v[0] for cid, v in checks.items() if cid != "xread.sine_1k.wav"}
+            self.assertTrue(all(s == "PASS" for s in others.values()), msg=proc.stdout)
+            self.assertEqual(summary, "summary: 31/32")
+
+    def test_one_sample_short_fails_count_but_xread_agrees(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="sim-fail-short-") as tmp:
+            d = Path(tmp)
+            self._prepare_dir_with_Valid_files(d)
+            _write_raw_wav(d / "sine_1k.wav", [0] * 47999)
+            results = {r.check_id: r for r in check.run_all_checks(d)}
+            self.assertFalse(results["count.sine_1k.wav"].passed)
+            self.assertTrue(results["xread.sine_1k.wav"].passed)
+            self.assertEqual(results["xread.sine_1k.wav"].measured, "agree")
+
+    def test_xread_reports_wrong_layout_and_too_large(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="sim-fail-layout-") as tmp:
+            d = Path(tmp)
+            self._prepare_dir_with_Valid_files(d)
+            list_chunk = b"LIST" + struct.pack("<L", 4) + b"abcd"
+            good = (d / "silence.wav").read_bytes()
+            data = good[:36] + list_chunk + good[36:]
+            data = data[:4] + struct.pack("<L", len(data) - 8) + data[8:]
+            (d / "silence.wav").write_bytes(data)
+            (d / "clicks_10.wav").write_bytes(b"\0" * (check.XREAD_MAX_BYTES + 1))
+            results = {r.check_id: r for r in check.run_all_checks(d)}
+            self.assertEqual(results["xread.silence.wav"].measured, "error:struct:layout:fmt +LIST+data")
+            self.assertEqual(results["xread.clicks_10.wav"].measured, "error:struct:too_large")
+
+
+class CompareReadersTests(unittest.TestCase):
+    """Revision 2 test 4: the cross-check is not vacuous."""
+
+    def _pair(self, samples: list[int]) -> tuple[wavparse.ParsedWav, measure.WavMeasurement]:
+        parsed = wavparse.parse_wav(_wav_bytes(samples))
+        m = measure.WavMeasurement(
+            ok=True,
+            nchannels=1,
+            sampwidth=2,
+            framerate=48000,
+            comptype="NONE",
+            nframes_header=len(samples),
+            raw_bytes_len=2 * len(samples),
+            samples=array("h", samples),
+        )
+        return parsed, m
+
+    def test_agree(self) -> None:
+        parsed, m = self._pair([0, 1, -1, 5, 6])
+        self.assertEqual(check.compare_readers(parsed, m), "agree")
+
+    def test_sample_difference_reported(self) -> None:
+        parsed, m = self._pair([0, 1, -1, 5, 6])
+        m = dataclasses.replace(m, samples=array("h", [0, 1, -1, 4, 6]))
+        self.assertEqual(check.compare_readers(parsed, m), "diff:samples(first=3,count=1)")
+
+    def test_framerate_difference_reported(self) -> None:
+        parsed, m = self._pair([0, 1, -1, 5, 6])
+        m = dataclasses.replace(m, framerate=44100)
+        self.assertEqual(check.compare_readers(parsed, m), "diff:framerate(wave=44100,struct=48000)")
+
+
+def _wav_bytes(samples: list[int], *, rate: int = 48000) -> bytes:
+    """Simulated test helper: a canonical mono 16-bit WAV built with `struct.pack` only."""
+    pcm = b"".join(struct.pack("<h", s) for s in samples)
+    return _riff([(b"fmt ", _fmt_body(rate=rate)), (b"data", pcm)])
+
+
+def _fmt_body(*, tag: int = 1, ch: int = 1, rate: int = 48000, byte_rate: int | None = None,
+              align: int | None = None, bits: int = 16) -> bytes:
+    align = ch * bits // 8 if align is None else align
+    byte_rate = rate * align if byte_rate is None else byte_rate
+    return struct.pack("<HHLLHH", tag, ch, rate, byte_rate, align, bits)
+
+
+def _riff(chunks: list[tuple[bytes, bytes]]) -> bytes:
+    body = b"WAVE"
+    for cid, payload in chunks:
+        body += cid + struct.pack("<L", len(payload)) + payload + (b"\0" if len(payload) % 2 else b"")
+    return b"RIFF" + struct.pack("<L", len(body)) + body
+
+
+class WavParseTests(unittest.TestCase):
+    """Revision 2 test 3: parser unit cases, one mutation each (simulated)."""
+
+    SAMPLES = [0, 1, -1, 32767, -32768, 256]
+
+    def _tok(self, data: bytes) -> str:
+        with self.assertRaises(wavparse.WavFormatError) as cm:
+            wavparse.parse_wav(data)
+        return cm.exception.reason
+
+    def test_canonical_parses(self) -> None:
+        p = wavparse.parse_wav(_wav_bytes(self.SAMPLES))
+        self.assertEqual(p.samples, tuple(self.SAMPLES))
+        self.assertEqual(p.nframes, 6)
+        self.assertEqual(p.chunk_ids, ("fmt ", "data"))
+        self.assertEqual((p.data_offset, p.byte_rate, p.block_align), (44, 96000, 2))
+
+    def test_mutations(self) -> None:
+        good = _wav_bytes(self.SAMPLES)
+        pcm = b"".join(struct.pack("<h", s) for s in self.SAMPLES)
+        fmt = _fmt_body()
+        data_size_off = 40
+        cases = {
+            "short_file": good[:11],
+            "not_riff": b"RIFX" + good[4:],
+            "not_wave": good[:8] + b"WAVX" + good[12:],
+            "riff_size_mismatch": good[:4] + struct.pack("<L", len(good) - 6) + good[8:],
+            "chunk_overrun": good[:data_size_off] + struct.pack("<L", len(pcm) + 2) + good[44:],
+            "block_align_mismatch": _riff([(b"fmt ", _fmt_body(align=4)), (b"data", pcm)]),
+            "bad_bits": _riff([(b"fmt ", _fmt_body(bits=15)), (b"data", pcm)]),
+            "format_tag": _riff([(b"fmt ", _fmt_body(tag=3)), (b"data", pcm)]),
+            "bad_channels": _riff([(b"fmt ", _fmt_body(ch=0, align=0)), (b"data", pcm)]),
+            "byte_rate_mismatch": _riff([(b"fmt ", _fmt_body(byte_rate=48000)), (b"data", pcm)]),
+            "fmt_size": _riff([(b"fmt ", fmt + b"\0\0"), (b"data", pcm)]),
+            "data_before_fmt": _riff([(b"data", pcm), (b"fmt ", fmt)]),
+            "missing_data": _riff([(b"fmt ", fmt)]),
+            "missing_fmt": _riff([(b"data", pcm)]),
+            "duplicate_fmt": _riff([(b"fmt ", fmt), (b"fmt ", fmt), (b"data", pcm)]),
+            "duplicate_data": _riff([(b"fmt ", fmt), (b"data", pcm), (b"data", pcm)]),
+            "data_size_not_multiple": _riff([(b"fmt ", fmt), (b"data", pcm[:11])]),
+        }
+        # Trailing bytes after a consistent file: RIFF size no longer equals len - 8.
+        cases["riff_size_mismatch_trailing"] = good + b"\0\0\0\0"
+        for name, data in cases.items():
+            expected = name.removesuffix("_trailing")
+            with self.subTest(name):
+                self.assertEqual(self._tok(data), expected)
+
+    def test_extra_odd_chunk_with_pad_parses(self) -> None:
+        pcm = b"".join(struct.pack("<h", s) for s in self.SAMPLES)
+        data = _riff([(b"fmt ", _fmt_body()), (b"LIST", b"abc"), (b"data", pcm)])
+        p = wavparse.parse_wav(data)
+        self.assertEqual(p.chunk_ids, ("fmt ", "LIST", "data"))
+        self.assertEqual(p.samples, tuple(self.SAMPLES))
+
+    def test_non_16bit_mono_parses_without_samples(self) -> None:
+        data = _riff([(b"fmt ", _fmt_body(ch=2)), (b"data", b"\0" * 8)])
+        p = wavparse.parse_wav(data)
+        self.assertIsNone(p.samples)
+        self.assertEqual(p.nframes, 2)
 
 
 class EstimatorUnitTests(unittest.TestCase):
@@ -448,6 +615,21 @@ class IndependenceTests(unittest.TestCase):
                 set(),
                 f"{mod_name} must not import {forbidden_found}",
             )
+
+    def test_wavparse_imports_only_struct_and_dataclasses(self) -> None:
+        tree = ast.parse((PROJECT_DIR / "wavparse.py").read_text(encoding="utf-8"))
+        modules: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                modules.update(a.name for a in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                modules.add(node.module or "")
+            elif isinstance(node, ast.Call) and getattr(node.func, "id", "") == "__import__":
+                modules.add("__import__")
+        self.assertEqual(modules, {"struct", "dataclasses"})
+
+    def test_measure_does_not_import_wavparse(self) -> None:
+        self.assertNotIn("wavparse", self._scan_imports(PROJECT_DIR / "measure.py"))
 
     def test_oracle_imports_only_math(self) -> None:
         imported = self._scan_imports(PROJECT_DIR / "oracle.py")
