@@ -18,7 +18,7 @@ python -I -m unittest discover -s tests        # simulated; temporary directorie
 
 The specification, decisions, acceptance criteria and experiment results (EXP-002, the five-signal round-trip experiment) live in the lab's knowledge vault (CEREBRUM), record `SYS-002 — Audio workbench`. Evidence cites this repository as `SYS-002@<commit>`.
 
-History: this code lived in the vault at `projects/audio-workbench/` until M05.5 moved it here with `git subtree split`. Messages, authors and dates are preserved, but the commits were rewritten, so their hashes differ from the vault's. Evidence written before the move cites vault commits; this mapping links them:
+History: this code lived in the vault at `projects/audio-workbench/` until M05.5 moved it here with `git subtree split`. Messages and dates are preserved; the author was rewritten to SRD BODY (D-068), and the commits were rewritten, so their hashes differ from the vault's. Evidence written before the move cites vault commits; this mapping links them:
 
 | Vault commit | This repository |
 | --- | --- |
