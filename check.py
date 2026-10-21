@@ -2,7 +2,7 @@
 """CLI check program for the audio workbench (M04, D-043, D-045).
 
 Usage:
-  python -I projects/audio-workbench/check.py <dir>
+  python -I check.py <dir>
 
 Compares `measure` results against `oracle` closed-form expectations without
 importing or calling `synth` or `generate` (AC8).

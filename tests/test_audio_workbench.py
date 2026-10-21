@@ -26,7 +26,7 @@ from unittest import mock
 import wave
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
-REPO_ROOT = PROJECT_DIR.parents[1]
+REPO_ROOT = PROJECT_DIR  # the project's own repository (M05.5)
 if str(PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(PROJECT_DIR))
 
@@ -120,8 +120,12 @@ class RoundTripTests(unittest.TestCase):
 class RefusalTests(unittest.TestCase):
     """Test group 2: Refusals and no-clobber guarantees (AC1)."""
 
+    def test_repo_root_is_this_repository(self) -> None:
+        """M05.5: the output boundary is this project's own repository, not its parent folder."""
+        self.assertEqual(generate.repo_root(), PROJECT_DIR)
+
     def test_refuses_out_inside_repo_directly_and_via_symlink(self) -> None:
-        inside_dir = REPO_ROOT / "projects" / "audio-workbench" / "inside-test-out"
+        inside_dir = REPO_ROOT / "inside-test-out"
         self.assertFalse(inside_dir.exists())
         proc = subprocess.run(
             [sys.executable, "-I", str(PROJECT_DIR / "generate.py"), "--out", str(inside_dir)],
@@ -135,7 +139,7 @@ class RefusalTests(unittest.TestCase):
         # Symlink outside repo pointing inside repo
         with tempfile.TemporaryDirectory(prefix="sim-audio-symlink-") as tmp:
             link_path = Path(tmp) / "link_to_repo"
-            link_path.symlink_to(REPO_ROOT / "projects" / "audio-workbench")
+            link_path.symlink_to(REPO_ROOT)
             target_via_link = link_path / "symlink-out"
             proc_sym = subprocess.run(
                 [sys.executable, "-I", str(PROJECT_DIR / "generate.py"), "--out", str(target_via_link)],
@@ -144,7 +148,7 @@ class RefusalTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(proc_sym.returncode, 2)
-            self.assertFalse((REPO_ROOT / "projects" / "audio-workbench" / "symlink-out").exists())
+            self.assertFalse((REPO_ROOT / "symlink-out").exists())
 
     def test_refuses_when_one_target_exists_and_preserves_bytes(self) -> None:
         with tempfile.TemporaryDirectory(prefix="sim-audio-exists-") as tmp:

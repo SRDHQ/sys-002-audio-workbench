@@ -2,7 +2,7 @@
 """CLI generator for the five audio workbench test signals (M04, D-043, D-045).
 
 Usage:
-  python -I projects/audio-workbench/generate.py --out <dir>
+  python -I generate.py --out <dir>
 
 Safety & no-clobber guarantees (AC1):
 - Resolves `<dir>` and refuses with exit 2 if it is inside the repository
@@ -34,8 +34,8 @@ else:
 
 
 def repo_root() -> Path:
-    """Return the repository root `Path(__file__).resolve().parents[2]`."""
-    return Path(__file__).resolve().parents[2]
+    """Return the root of this project's repository (SYS-002; was the vault before M05.5)."""
+    return Path(__file__).resolve().parent
 
 
 def check_out_dir(out_dir: str | Path, root: Path | None = None) -> Path:
