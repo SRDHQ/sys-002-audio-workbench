@@ -2,7 +2,7 @@
 
 Part of **SRD (Systems Research & Development)**. Designation **SYS-002**, site **SRD-01**.
 
-Generates five reference test signals as 48 kHz, 16-bit mono PCM WAV files (a 1 kHz sine, a logarithmic sweep, a click train, silence and a clipped sine), reads them back, and checks each one against closed-form expectations computed independently of the generator (27 checks). Python standard library only; nothing is played back.
+Generates five reference test signals as 48 kHz, 16-bit mono PCM WAV files (a 1 kHz sine, a logarithmic sweep, a click train, silence and a clipped sine), reads them back, and checks each one against closed-form expectations computed independently of the generator (32 checks, including a cross-check of the `wave`-based reader against an independent `struct`-based one in `wavparse.py`). Python standard library only; nothing is played back.
 
 ## Use
 
